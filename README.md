@@ -15,3 +15,6 @@ Site de agendamento da D'Barros Barbearia integrado ao Supabase.
 4. Build Command: deixar vazio.
 5. Output Directory: deixar vazio.
 6. Deploy.
+
+
+Atualização para deploy
