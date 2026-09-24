@@ -352,6 +352,8 @@ let cachedCompleted = [];
 let cachedCancelled = [];
 let clientSpotlightIndex = 0;
 let clientSpotlightTimer = null;
+let adminRefreshTimer = null;
+let adminRefreshBusy = false;
 let qrCameraStream = null;
 let qrCameraLoop = null;
 let slotsRenderToken = 0;
@@ -434,6 +436,7 @@ async function logout(){
   clearClientSession();
   await db.auth.signOut();
   stopClientSpotlight();
+  stopAdminAutoRefresh();
   document.getElementById('authClientForm').reset();
   document.getElementById('authOwnerForm').reset();
   await initApp();
@@ -456,8 +459,9 @@ async function initApp(){
   const client=getClientSession();
   const va=document.getElementById('viewAuth'),vc=document.getElementById('viewCliente'),vd=document.getElementById('viewAdmin');
   if(owner){
-    va.hidden=true;vc.hidden=true;vd.hidden=false;renderNav('owner');await renderAdmin();startClientSpotlight();
+    va.hidden=true;vc.hidden=true;vd.hidden=false;renderNav('owner');await renderAdmin();startClientSpotlight();startAdminAutoRefresh();
   } else if(client){
+    stopAdminAutoRefresh();
     va.hidden=true;vc.hidden=false;vd.hidden=true;renderNav('client');
     document.getElementById('custName').value=client.name||'';
     document.getElementById('custPhone').value=client.phone||'';
@@ -465,7 +469,7 @@ async function initApp(){
     renderServices();
     await renderSlots();
   } else {
-    va.hidden=false;vc.hidden=true;vd.hidden=true;renderNav(null);stopClientSpotlight();
+    va.hidden=false;vc.hidden=true;vd.hidden=true;renderNav(null);stopClientSpotlight();stopAdminAutoRefresh();
   }
 }
 
@@ -530,6 +534,20 @@ function finalizePaymentAndClose(){const b=pendingBooking;if(!b)return;const [y,
 
 function mapBooking(row){return {id:row.id,date:row.appointment_date,time:String(row.start_time).slice(0,5),price:Number(row.total_price),duration:Number(row.duration_minutes),status:row.status,name:row.customers?.name||'',phone:row.customers?.phone||'',services:(row.booking_services||[]).map(x=>x.services?.name).filter(Boolean)};}
 async function fetchBookingsByStatus(statuses){let q=db.from('bookings').select('id,appointment_date,start_time,total_price,duration_minutes,status,customers(name,phone),booking_services(services(name))').in('status',statuses).order('appointment_date').order('start_time');const {data,error}=await q;if(error){console.error(error);return [];}return (data||[]).map(mapBooking);}
+function startAdminAutoRefresh(){
+  if(adminRefreshTimer) return;
+  adminRefreshTimer=setInterval(async()=>{
+    if(document.hidden||adminRefreshBusy||document.getElementById('viewAdmin')?.hidden) return;
+    adminRefreshBusy=true;
+    try{ await renderAdmin(); } finally { adminRefreshBusy=false; }
+  },15000);
+}
+function stopAdminAutoRefresh(){
+  if(adminRefreshTimer) clearInterval(adminRefreshTimer);
+  adminRefreshTimer=null;
+  adminRefreshBusy=false;
+}
+
 async function renderAdmin(){
   const [upcoming,customers,inventory,completed,cancelled]=await Promise.all([fetchBookingsByStatus(['scheduled','confirmed']),db.from('customers').select('id,name,phone,created_at').order('created_at',{ascending:false}),db.from('inventory').select('id,name,quantity,low_stock_threshold').order('name'),fetchBookingsByStatus(['completed']),fetchBookingsByStatus(['cancelled'])]);
   cachedCustomers=customers.data||[];cachedInventory=inventory.data||[];cachedCompleted=completed;cachedCancelled=cancelled;
