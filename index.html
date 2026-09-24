@@ -300,11 +300,13 @@
             Data
             <input type="date" id="blockDate">
           </label>
-          <label style="flex-direction:row;align-items:center;gap:8px;padding-bottom:10px;color:var(--cream);">
-            <input type="checkbox" id="blockFullDay" onchange="toggleBlockTimeFields()">
-            Dia inteiro
-          </label>
         </div>
+        <div class="add-prod" style="margin-top:12px;">
+          <button class="btn ghost" type="button" onclick="setBlockPreset('full')">Dia inteiro</button>
+          <button class="btn ghost" type="button" onclick="setBlockPreset('morning')">Somente manhã</button>
+          <button class="btn ghost" type="button" onclick="setBlockPreset('afternoon')">Somente tarde</button>
+        </div>
+        <input type="hidden" id="blockPreset" value="manual">
         <div class="period-picker" id="blockTimeFields">
           <label>
             De
@@ -635,10 +637,36 @@ function stopClientSpotlight(){clearInterval(clientSpotlightTimer);clientSpotlig
 function openClientsModal(){const el=document.getElementById('clientsModalList');el.innerHTML=cachedCustomers.length?cachedCustomers.map(c=>`<div class="booking-row"><span>${escapeHtml(c.name)}</span><span style="color:var(--muted);">${escapeHtml(c.phone)} · desde ${new Date(c.created_at).toLocaleDateString('pt-BR')}</span></div>`).join(''):'<div class="empty-msg">Nenhum cliente cadastrado ainda.</div>';document.getElementById('clientsModal').classList.add('show');}
 function closeClientsModal(){document.getElementById('clientsModal').classList.remove('show');}
 
-function toggleBlockTimeFields(){
-  const full=document.getElementById('blockFullDay')?.checked;
+function setBlockPreset(type){
+  const date=document.getElementById('blockDate')?.value;
+  if(!date){showToast('Escolha a data primeiro.');return;}
+  const preset=document.getElementById('blockPreset');
   const fields=document.getElementById('blockTimeFields');
-  if(fields) fields.style.display=full?'none':'flex';
+  const start=document.getElementById('blockStart');
+  const end=document.getElementById('blockEnd');
+  const d=new Date(date+'T12:00:00');
+  const isSaturday=d.getDay()===6;
+
+  preset.value=type;
+
+  if(type==='full'){
+    start.value='';
+    end.value='';
+    fields.style.display='none';
+    showToast('Dia inteiro selecionado.');
+  } else if(type==='morning'){
+    start.value=isSaturday?'08:00':'09:00';
+    end.value='12:00';
+    fields.style.display='flex';
+    showToast('Manhã selecionada.');
+  } else if(type==='afternoon'){
+    start.value='13:30';
+    end.value=isSaturday?'19:30':'19:00';
+    fields.style.display='flex';
+    showToast('Tarde selecionada.');
+  } else {
+    fields.style.display='flex';
+  }
 }
 
 function renderScheduleBlocks(){
@@ -658,7 +686,8 @@ function renderScheduleBlocks(){
 
 async function addScheduleBlock(){
   const date=document.getElementById('blockDate')?.value;
-  const full=!!document.getElementById('blockFullDay')?.checked;
+  const preset=document.getElementById('blockPreset')?.value||'manual';
+  const full=preset==='full';
   const start=document.getElementById('blockStart')?.value||null;
   const end=document.getElementById('blockEnd')?.value||null;
   const reason=document.getElementById('blockReason')?.value.trim()||null;
@@ -678,8 +707,8 @@ async function addScheduleBlock(){
   document.getElementById('blockReason').value='';
   document.getElementById('blockStart').value='';
   document.getElementById('blockEnd').value='';
-  document.getElementById('blockFullDay').checked=false;
-  toggleBlockTimeFields();
+  document.getElementById('blockPreset').value='manual';
+  document.getElementById('blockTimeFields').style.display='flex';
   showToast('Agenda bloqueada com sucesso.');
   await renderAdmin();
   if(state.date===date) await renderSlots();
