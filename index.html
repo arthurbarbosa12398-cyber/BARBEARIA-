@@ -292,6 +292,38 @@
     </section>
 
     <section class="band wrap adm-section">
+      <span class="label">Bloquear agenda</span>
+      <div class="admin-panel">
+        <h3>Indisponibilidade</h3>
+        <div class="period-picker">
+          <label>
+            Data
+            <input type="date" id="blockDate">
+          </label>
+          <label style="flex-direction:row;align-items:center;gap:8px;padding-bottom:10px;color:var(--cream);">
+            <input type="checkbox" id="blockFullDay" onchange="toggleBlockTimeFields()">
+            Dia inteiro
+          </label>
+        </div>
+        <div class="period-picker" id="blockTimeFields">
+          <label>
+            De
+            <input type="time" id="blockStart" step="1800">
+          </label>
+          <label>
+            Até
+            <input type="time" id="blockEnd" step="1800">
+          </label>
+        </div>
+        <div class="add-prod">
+          <input type="text" id="blockReason" placeholder="Motivo (opcional)">
+          <button class="btn ghost" type="button" onclick="addScheduleBlock()">Bloquear</button>
+        </div>
+        <div id="scheduleBlockList" style="margin-top:16px;"></div>
+      </div>
+    </section>
+
+    <section class="band wrap adm-section">
       <span class="label">Clientes cadastrados</span>
       <div class="client-spotlight-row">
         <div class="client-spotlight" id="clientSpotlight"></div>
@@ -350,6 +382,7 @@ let cachedCustomers = [];
 let cachedInventory = [];
 let cachedCompleted = [];
 let cachedCancelled = [];
+let cachedScheduleBlocks = [];
 let clientSpotlightIndex = 0;
 let clientSpotlightTimer = null;
 let adminRefreshTimer = null;
@@ -571,10 +604,19 @@ async function renderAdmin(){
   cachedCancelled=allBookings.filter(b=>b.status==='cancelled');
   cachedCustomers=data?.customers||[];
   cachedInventory=data?.inventory||[];
+  cachedScheduleBlocks=data?.schedule_blocks||[];
 
   const bl=document.getElementById('bookingsList');
   bl.innerHTML=upcoming.length?upcoming.map(b=>{const [y,m,d]=b.date.split('-');return `<div class="booking-row"><span>${d}/${m} ${b.time} — ${escapeHtml(b.services.join(' + '))} · ${formatCurrency(b.price)}<br><span style="color:var(--muted);font-size:.85rem;">${escapeHtml(b.name)} · ${escapeHtml(b.phone)}</span></span><div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;"><button class="btn ghost" style="padding:8px 10px;font-size:.75rem;" onclick="completeBooking('${b.id}')">Concluído</button><button class="btn ghost" style="padding:8px 10px;font-size:.75rem;" onclick="cancelBooking('${b.id}')">Desistiu</button></div></div>`}).join(''):'<div class="empty-msg">Nenhum agendamento ainda.</div>';
   renderClientSpotlight();
+  renderScheduleBlocks();
+  const blockDate=document.getElementById('blockDate');
+  if(blockDate && !blockDate.value){
+    const today=new Date();
+    const todayKey=[today.getFullYear(),String(today.getMonth()+1).padStart(2,'0'),String(today.getDate()).padStart(2,'0')].join('-');
+    blockDate.value=todayKey;
+    blockDate.min=todayKey;
+  }
   const range=getDateRangePreset();
   if(!document.getElementById('closeStartDate').value)document.getElementById('closeStartDate').value=range.start;
   if(!document.getElementById('closeEndDate').value)document.getElementById('closeEndDate').value=range.end;
@@ -592,6 +634,66 @@ function startClientSpotlight(){if(clientSpotlightTimer)return;clientSpotlightIn
 function stopClientSpotlight(){clearInterval(clientSpotlightTimer);clientSpotlightTimer=null;}
 function openClientsModal(){const el=document.getElementById('clientsModalList');el.innerHTML=cachedCustomers.length?cachedCustomers.map(c=>`<div class="booking-row"><span>${escapeHtml(c.name)}</span><span style="color:var(--muted);">${escapeHtml(c.phone)} · desde ${new Date(c.created_at).toLocaleDateString('pt-BR')}</span></div>`).join(''):'<div class="empty-msg">Nenhum cliente cadastrado ainda.</div>';document.getElementById('clientsModal').classList.add('show');}
 function closeClientsModal(){document.getElementById('clientsModal').classList.remove('show');}
+
+function toggleBlockTimeFields(){
+  const full=document.getElementById('blockFullDay')?.checked;
+  const fields=document.getElementById('blockTimeFields');
+  if(fields) fields.style.display=full?'none':'flex';
+}
+
+function renderScheduleBlocks(){
+  const el=document.getElementById('scheduleBlockList');
+  if(!el) return;
+  if(!cachedScheduleBlocks.length){
+    el.innerHTML='<div class="empty-msg">Nenhuma data ou horário bloqueado.</div>';
+    return;
+  }
+  el.innerHTML=cachedScheduleBlocks.map(b=>{
+    const [y,m,d]=String(b.block_date).split('-');
+    const period=b.full_day?'Dia inteiro':`${String(b.start_time||'').slice(0,5)} às ${String(b.end_time||'').slice(0,5)}`;
+    const reason=b.reason?` · ${escapeHtml(b.reason)}`:'';
+    return `<div class="booking-row"><span><strong>${d}/${m}</strong> · ${period}${reason}</span><button class="btn ghost" type="button" style="padding:8px 10px;font-size:.75rem;" onclick="deleteScheduleBlock('${b.id}')">Desbloquear</button></div>`;
+  }).join('');
+}
+
+async function addScheduleBlock(){
+  const date=document.getElementById('blockDate')?.value;
+  const full=!!document.getElementById('blockFullDay')?.checked;
+  const start=document.getElementById('blockStart')?.value||null;
+  const end=document.getElementById('blockEnd')?.value||null;
+  const reason=document.getElementById('blockReason')?.value.trim()||null;
+  if(!date){showToast('Escolha a data que deseja bloquear.');return;}
+  if(!full && (!start||!end||start>=end)){showToast('Informe um horário inicial e final válido.');return;}
+
+  const {error}=await db.rpc('owner_add_schedule_block',{
+    p_token:getOwnerToken(),
+    p_date:date,
+    p_start_time:full?null:start,
+    p_end_time:full?null:end,
+    p_full_day:full,
+    p_reason:reason
+  });
+  if(error){console.error(error);showToast(error.message||'Não foi possível bloquear a agenda.');return;}
+
+  document.getElementById('blockReason').value='';
+  document.getElementById('blockStart').value='';
+  document.getElementById('blockEnd').value='';
+  document.getElementById('blockFullDay').checked=false;
+  toggleBlockTimeFields();
+  showToast('Agenda bloqueada com sucesso.');
+  await renderAdmin();
+  if(state.date===date) await renderSlots();
+}
+
+async function deleteScheduleBlock(id){
+  const block=cachedScheduleBlocks.find(b=>b.id===id);
+  const {error}=await db.rpc('owner_delete_schedule_block',{p_token:getOwnerToken(),p_block_id:id});
+  if(error){console.error(error);showToast('Não foi possível desbloquear a agenda.');return;}
+  showToast('Agenda desbloqueada.');
+  await renderAdmin();
+  if(block?.block_date && state.date===block.block_date) await renderSlots();
+}
+
 function renderInventory(){const il=document.getElementById('inventoryList');il.innerHTML=cachedInventory.length?cachedInventory.map(p=>`<div class="adm-item"><span class="n ${p.quantity<p.low_stock_threshold?'low':''}">${escapeHtml(p.name)}${p.quantity<p.low_stock_threshold?' · estoque baixo':''}</span><div class="qty-ctrl"><button onclick="changeQty('${p.id}',-1)">−</button><span class="qty-val">${p.quantity}</span><button onclick="changeQty('${p.id}',1)">+</button></div></div>`).join(''):'<div class="empty-msg">Nenhum produto cadastrado ainda. Adicione abaixo.</div>';}
 async function changeQty(id,delta){const p=cachedInventory.find(x=>x.id===id);if(!p)return;const qty=Math.max(0,Number(p.quantity)+delta);const {error}=await db.rpc('owner_set_inventory_quantity',{p_token:getOwnerToken(),p_inventory_id:id,p_quantity:qty});if(error){console.error(error);showToast('Erro ao atualizar estoque.');return;}p.quantity=qty;renderInventory();}
 async function addProduct(){const name=document.getElementById('newProdName').value.trim(),qty=parseInt(document.getElementById('newProdQty').value,10);if(!name||Number.isNaN(qty)||qty<0)return;const {error}=await db.rpc('owner_add_inventory',{p_token:getOwnerToken(),p_name:name,p_quantity:qty});if(error){console.error(error);showToast('Não foi possível adicionar o produto.');return;}document.getElementById('newProdName').value='';document.getElementById('newProdQty').value='';await renderAdmin();}
