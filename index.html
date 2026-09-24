@@ -187,8 +187,8 @@
     </form>
 
     <form class="book" id="authOwnerForm" onsubmit="return handleOwnerAuth(event)" hidden>
-      <input type="email" id="authOwnerUser" placeholder="E-mail do dono" required>
-      <input type="password" id="authOwnerPass" placeholder="Senha" required>
+      <input type="text" id="authOwnerUser" placeholder="Usuário do dono" autocomplete="username" required>
+      <input type="password" id="authOwnerPass" placeholder="Senha" autocomplete="current-password" required>
       <button class="btn" type="submit">Entrar como dono</button>
       <p class="label" id="ownerAuthError" style="color:var(--red);" hidden>Usuário ou senha incorretos.</p>
     </form>
@@ -363,6 +363,9 @@ function getClientSession(){
 }
 function setClientSession(s){ localStorage.setItem('dbarros_client_session', JSON.stringify(s)); }
 function clearClientSession(){ localStorage.removeItem('dbarros_client_session'); }
+function getOwnerToken(){ return localStorage.getItem('dbarros_owner_token') || ''; }
+function setOwnerToken(token){ localStorage.setItem('dbarros_owner_token', token); }
+function clearOwnerToken(){ localStorage.removeItem('dbarros_owner_token'); }
 function formatCurrency(value){ return new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(Number(value)||0); }
 function escapeHtml(v=''){ return String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function normalizePhone(v=''){ return String(v).replace(/\D/g,''); }
@@ -392,49 +395,36 @@ function handleClientAuth(e){
 }
 async function handleOwnerAuth(e){
   e.preventDefault();
-  const email=document.getElementById('authOwnerUser').value.trim().toLowerCase();
+  const username=document.getElementById('authOwnerUser').value.trim();
   const pass=document.getElementById('authOwnerPass').value;
   const err=document.getElementById('ownerAuthError');
+  const btn=document.querySelector('#authOwnerForm button[type="submit"]');
   err.hidden=true;
+  btn.disabled=true;
+  btn.textContent='Entrando...';
 
-  if(email !== 'robertdbarros@gmail.com'){
-    err.textContent='Este e-mail não está autorizado como dono.';
+  const {data,error}=await db.rpc('owner_login',{p_username:username,p_password:pass});
+
+  btn.disabled=false;
+  btn.textContent='Entrar como dono';
+
+  if(error || !data){
+    console.error(error);
+    err.textContent='Usuário ou senha incorretos.';
     err.hidden=false;
     return false;
   }
 
-  let {data,error}=await db.auth.signInWithPassword({email,password:pass});
-
-  if(error || !data.user){
-    const signup=await db.auth.signUp({email,password:pass});
-    if(signup.error){
-      err.textContent='Não foi possível entrar ou criar o acesso. Confira a senha e tente novamente.';
-      err.hidden=false;
-      return false;
-    }
-    if(!signup.data.session){
-      err.textContent='Primeiro acesso criado. Confirme o e-mail recebido e depois entre novamente.';
-      err.hidden=false;
-      return false;
-    }
-    data=signup.data;
-  }
-
-  const {data:owner}=await db.from('owners').select('user_id').eq('user_id',data.user.id).maybeSingle();
-  if(!owner){
-    await db.auth.signOut();
-    err.textContent='Confirme o e-mail do dono antes de entrar no painel.';
-    err.hidden=false;
-    return false;
-  }
-
+  setOwnerToken(data);
   clearClientSession();
   await initApp();
   return false;
 }
 async function logout(){
   clearClientSession();
-  await db.auth.signOut();
+  const token=getOwnerToken();
+  if(token) await db.rpc('owner_logout',{p_token:token});
+  clearOwnerToken();
   stopClientSpotlight();
   stopAdminAutoRefresh();
   document.getElementById('authClientForm').reset();
@@ -442,10 +432,14 @@ async function logout(){
   await initApp();
 }
 async function getOwnerSession(){
-  const {data:{user}}=await db.auth.getUser();
-  if(!user) return null;
-  const {data}=await db.from('owners').select('user_id').eq('user_id',user.id).maybeSingle();
-  return data ? {role:'owner',user} : null;
+  const token=getOwnerToken();
+  if(!token) return null;
+  const {data,error}=await db.rpc('owner_session_valid',{p_token:token});
+  if(error || !data){
+    clearOwnerToken();
+    return null;
+  }
+  return {role:'owner'};
 }
 function renderNav(role){
   const nav=document.getElementById('navToggle');
@@ -549,12 +543,45 @@ function stopAdminAutoRefresh(){
 }
 
 async function renderAdmin(){
-  const [upcoming,customers,inventory,completed,cancelled]=await Promise.all([fetchBookingsByStatus(['scheduled','confirmed']),db.from('customers').select('id,name,phone,created_at').order('created_at',{ascending:false}),db.from('inventory').select('id,name,quantity,low_stock_threshold').order('name'),fetchBookingsByStatus(['completed']),fetchBookingsByStatus(['cancelled'])]);
-  cachedCustomers=customers.data||[];cachedInventory=inventory.data||[];cachedCompleted=completed;cachedCancelled=cancelled;
-  const bl=document.getElementById('bookingsList');bl.innerHTML=upcoming.length?upcoming.map(b=>{const [y,m,d]=b.date.split('-');return `<div class="booking-row"><span>${d}/${m} ${b.time} — ${escapeHtml(b.services.join(' + '))} · ${formatCurrency(b.price)}<br><span style="color:var(--muted);font-size:.85rem;">${escapeHtml(b.name)} · ${escapeHtml(b.phone)}</span></span><div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;"><button class="btn ghost" style="padding:8px 10px;font-size:.75rem;" onclick="completeBooking('${b.id}')">Concluído</button><button class="btn ghost" style="padding:8px 10px;font-size:.75rem;" onclick="cancelBooking('${b.id}')">Desistiu</button></div></div>`}).join(''):'<div class="empty-msg">Nenhum agendamento ainda.</div>';
-  renderClientSpotlight(); const range=getDateRangePreset();if(!document.getElementById('closeStartDate').value)document.getElementById('closeStartDate').value=range.start;if(!document.getElementById('closeEndDate').value)document.getElementById('closeEndDate').value=range.end;generateMonthClosure();renderInventory();
+  const token=getOwnerToken();
+  if(!token) return;
+
+  const {data,error}=await db.rpc('owner_admin_snapshot',{p_token:token});
+  if(error){
+    console.error(error);
+    clearOwnerToken();
+    showToast('Sua sessão do painel expirou. Entre novamente.');
+    await initApp();
+    return;
+  }
+
+  const allBookings=(data?.bookings||[]).map(row=>({
+    id:row.id,
+    date:row.appointment_date,
+    time:String(row.start_time||'').slice(0,5),
+    price:Number(row.total_price||0),
+    duration:Number(row.duration_minutes||0),
+    status:row.status,
+    name:row.name||'',
+    phone:row.phone||'',
+    services:Array.isArray(row.services)?row.services:[]
+  }));
+  const upcoming=allBookings.filter(b=>['scheduled','confirmed'].includes(b.status));
+  cachedCompleted=allBookings.filter(b=>b.status==='completed');
+  cachedCancelled=allBookings.filter(b=>b.status==='cancelled');
+  cachedCustomers=data?.customers||[];
+  cachedInventory=data?.inventory||[];
+
+  const bl=document.getElementById('bookingsList');
+  bl.innerHTML=upcoming.length?upcoming.map(b=>{const [y,m,d]=b.date.split('-');return `<div class="booking-row"><span>${d}/${m} ${b.time} — ${escapeHtml(b.services.join(' + '))} · ${formatCurrency(b.price)}<br><span style="color:var(--muted);font-size:.85rem;">${escapeHtml(b.name)} · ${escapeHtml(b.phone)}</span></span><div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;"><button class="btn ghost" style="padding:8px 10px;font-size:.75rem;" onclick="completeBooking('${b.id}')">Concluído</button><button class="btn ghost" style="padding:8px 10px;font-size:.75rem;" onclick="cancelBooking('${b.id}')">Desistiu</button></div></div>`}).join(''):'<div class="empty-msg">Nenhum agendamento ainda.</div>';
+  renderClientSpotlight();
+  const range=getDateRangePreset();
+  if(!document.getElementById('closeStartDate').value)document.getElementById('closeStartDate').value=range.start;
+  if(!document.getElementById('closeEndDate').value)document.getElementById('closeEndDate').value=range.end;
+  generateMonthClosure();
+  renderInventory();
 }
-async function markBookingStatus(id,status){const {error}=await db.from('bookings').update({status,updated_at:new Date().toISOString()}).eq('id',id);if(error){showToast('Não foi possível atualizar o agendamento.');return;}await renderAdmin();await renderSlots();}
+async function markBookingStatus(id,status){const {error}=await db.rpc('owner_set_booking_status',{p_token:getOwnerToken(),p_booking_id:id,p_status:status});if(error){console.error(error);showToast('Não foi possível atualizar o agendamento.');return;}await renderAdmin();await renderSlots();}
 function completeBooking(id){return markBookingStatus(id,'completed');}
 function cancelBooking(id){return markBookingStatus(id,'cancelled');}
 function getDateRangePreset(){const t=new Date(),f=new Date(t.getFullYear(),t.getMonth(),1),l=new Date(t.getFullYear(),t.getMonth()+1,0);const fmt=d=>[d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');return{start:fmt(f),end:fmt(l)};}
@@ -566,10 +593,9 @@ function stopClientSpotlight(){clearInterval(clientSpotlightTimer);clientSpotlig
 function openClientsModal(){const el=document.getElementById('clientsModalList');el.innerHTML=cachedCustomers.length?cachedCustomers.map(c=>`<div class="booking-row"><span>${escapeHtml(c.name)}</span><span style="color:var(--muted);">${escapeHtml(c.phone)} · desde ${new Date(c.created_at).toLocaleDateString('pt-BR')}</span></div>`).join(''):'<div class="empty-msg">Nenhum cliente cadastrado ainda.</div>';document.getElementById('clientsModal').classList.add('show');}
 function closeClientsModal(){document.getElementById('clientsModal').classList.remove('show');}
 function renderInventory(){const il=document.getElementById('inventoryList');il.innerHTML=cachedInventory.length?cachedInventory.map(p=>`<div class="adm-item"><span class="n ${p.quantity<p.low_stock_threshold?'low':''}">${escapeHtml(p.name)}${p.quantity<p.low_stock_threshold?' · estoque baixo':''}</span><div class="qty-ctrl"><button onclick="changeQty('${p.id}',-1)">−</button><span class="qty-val">${p.quantity}</span><button onclick="changeQty('${p.id}',1)">+</button></div></div>`).join(''):'<div class="empty-msg">Nenhum produto cadastrado ainda. Adicione abaixo.</div>';}
-async function changeQty(id,delta){const p=cachedInventory.find(x=>x.id===id);if(!p)return;const qty=Math.max(0,Number(p.quantity)+delta);const {error}=await db.from('inventory').update({quantity:qty,updated_at:new Date().toISOString()}).eq('id',id);if(error){showToast('Erro ao atualizar estoque.');return;}p.quantity=qty;renderInventory();}
-async function addProduct(){const name=document.getElementById('newProdName').value.trim(),qty=parseInt(document.getElementById('newProdQty').value,10);if(!name||Number.isNaN(qty)||qty<0)return;const {error}=await db.from('inventory').insert({name,quantity:qty});if(error){showToast('Não foi possível adicionar o produto.');return;}document.getElementById('newProdName').value='';document.getElementById('newProdQty').value='';await renderAdmin();}
+async function changeQty(id,delta){const p=cachedInventory.find(x=>x.id===id);if(!p)return;const qty=Math.max(0,Number(p.quantity)+delta);const {error}=await db.rpc('owner_set_inventory_quantity',{p_token:getOwnerToken(),p_inventory_id:id,p_quantity:qty});if(error){console.error(error);showToast('Erro ao atualizar estoque.');return;}p.quantity=qty;renderInventory();}
+async function addProduct(){const name=document.getElementById('newProdName').value.trim(),qty=parseInt(document.getElementById('newProdQty').value,10);if(!name||Number.isNaN(qty)||qty<0)return;const {error}=await db.rpc('owner_add_inventory',{p_token:getOwnerToken(),p_name:name,p_quantity:qty});if(error){console.error(error);showToast('Não foi possível adicionar o produto.');return;}document.getElementById('newProdName').value='';document.getElementById('newProdQty').value='';await renderAdmin();}
 
-db.auth.onAuthStateChange(()=>setTimeout(initApp,0));
 initApp();
 </script>
 
